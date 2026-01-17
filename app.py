@@ -31,7 +31,7 @@ genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 # -----------------------------------------------------------
 def search_paper(query):
     # Gemini: 논문 검색
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
     response = model.generate_content(f"다음 주제에 대한 학술적 이론과 최신 선행 연구를 찾아서 요약해줘: {query}")
     return response.text
 
