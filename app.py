@@ -9,281 +9,199 @@ import time
 from docx import Document
 from io import BytesIO
 
-# -----------------------------------------------------------
-# 0. 에너지 가격표 및 스타일 설정
-# -----------------------------------------------------------
+# --- 0. 가격표 및 스타일 ---
 PRICES = {
-    "chat_step0": 10,      # 토론 코멘트
-    "var_confirm": 25,     # 변인 확정
-    "method_confirm": 30,  # 방법론 확정
-    "search": 30,          # 선행연구 검색
-    "draft": 100,          # 논문 초안 작성
-    "ref": 30,             # APA 변환
-    "side_chat": 5         # AI 조교 질문
+    "chat_step0": 10, "var_confirm": 25, "method_confirm": 30,
+    "search": 30, "draft": 100, "ref": 30, "side_chat": 5
 }
 
 st.set_page_config(page_title="MJP Research Lab", layout="wide")
-
-st.markdown("""
-<style>
+st.markdown("""<style>
     div.stButton > button:first-child { background-color: #2c3e50; color: white; border-radius: 6px; border: none; font-weight: 600;}
-    div.stButton > button:first-child:hover { background-color: #1a252f; }
     .energy-box { padding: 12px 20px; background-color: #f8f9fa; border-left: 5px solid #2c3e50; border-radius: 4px; display: flex; align-items: center; gap: 15px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     .energy-val { font-size: 22px; font-weight: bold; color: #2c3e50; font-family: monospace; }
-    .confirm-box { padding: 15px; border: 2px solid #e74c3c; background-color: #fdedec; border-radius: 8px; margin-top: 10px; margin-bottom: 10px; text-align: center; }
-    .log-entry { background-color: #fff; border: 1px solid #eee; border-radius: 8px; padding: 12px; margin-bottom: 8px; border-left: 4px solid #3498db; }
-</style>
-""", unsafe_allow_html=True)
+    .confirm-box { padding: 15px; border: 2px solid #e74c3c; background-color: #fdedec; border-radius: 8px; margin: 10px 0; text-align: center; }
+</style>""", unsafe_allow_html=True)
 
-# -----------------------------------------------------------
-# 1. 구글 시트 데이터베이스 연동
-# -----------------------------------------------------------
+# --- 1. 구글 시트 DB 함수 (안전장치 강화) ---
 @st.cache_resource
-def get_google_sheet_connection():
+def get_google_sheet():
     try:
         if "gcp_service_account" not in st.secrets: return None
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
         return gc.open("MJP 연구실 관리대장")
     except: return None
 
-def fetch_users_from_sheet():
-    sh = get_google_sheet_connection()
-    user_dict = {"zenova90": "0931285asd*"} # 관리자 기본값
-    if not sh: return user_dict
+def fetch_users():
+    admin_data = {"zenova90": "0931285asd*"} # 관리자 계정 고정
+    sh = get_google_sheet()
+    if not sh: return admin_data
     try:
         ws = sh.worksheet("Users")
-        records = ws.get_all_values()
-        for row in records[1:]:
-            if len(row) >= 3: user_dict[row[1]] = row[2]
-        return user_dict
-    except: return user_dict
+        for row in ws.get_all_values()[1:]:
+            if len(row) >= 3: admin_data[row[1]] = row[2]
+        return admin_data
+    except: return admin_data
 
-def register_user_to_sheet(new_id, new_pw):
-    sh = get_google_sheet_connection()
+def register_user(nid, npw):
+    sh = get_google_sheet()
     if not sh: return False, "DB 연결 오류 (Secrets 설정 확인)"
-    current = fetch_users_from_sheet()
-    if new_id in current: return False, "❌ 이미 존재하는 아이디입니다."
+    users = fetch_users()
+    if nid in users: return False, "❌ 이미 존재하는 ID입니다."
     try:
         ws = sh.worksheet("Users")
-        ws.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), new_id, new_pw])
-        return True, "✅ 가입 완료! 로그인 해주세요."
-    except: return False, "가입 처리 중 오류 발생"
+        ws.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), nid, npw])
+        return True, "✅ 가입 성공! 로그인 하세요."
+    except Exception as e: return False, f"오류: {e}"
 
-def log_to_sheet(username, action, content):
-    sh = get_google_sheet_connection()
+def log_to_sheet(user, action, content):
+    sh = get_google_sheet()
     if not sh: return
     try:
         ws = sh.worksheet("Logs")
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        time_str = datetime.datetime.now().strftime("%H:%M:%S")
-        ws.append_row([date_str, time_str, username, action, content])
+        now = datetime.datetime.now()
+        ws.append_row([now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), user, action, content])
     except: pass
 
-def fetch_logs_by_date(username, date_str):
-    sh = get_google_sheet_connection()
+def fetch_logs(user, date_str):
+    sh = get_google_sheet()
     if not sh: return []
     try:
         ws = sh.worksheet("Logs")
         rows = ws.get_all_values()
-        filtered = [{"time": r[1], "action": r[3], "content": r[4]} for r in rows[1:] if r[0] == date_str and r[2] == username]
-        return sorted(filtered, key=lambda x: x['time'], reverse=True)
+        return [{"time": r[1], "action": r[3], "content": r[4]} for r in rows[1:] if r[0]==date_str and r[2]==user]
     except: return []
 
-# -----------------------------------------------------------
-# 2. 문서화 및 유틸리티
-# -----------------------------------------------------------
-def create_word_report(username, date_str, logs):
-    doc = Document()
-    doc.add_heading(f'{username} 연구 보고서 ({date_str})', 0)
-    for log in logs:
-        doc.add_heading(f"[{log['time']}] {log['action']}", level=2)
-        doc.add_paragraph(log['content'])
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
+# --- 2. AI 및 유틸리티 ---
+openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
+genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
+
+def chat_with_context(prompt, ctx, stage):
+    try:
+        res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system","content":f"심리연구조교 '다온'. 단계:{stage}\n{ctx}"},{"role":"user","content":prompt}])
+        return res.choices[0].message.content
+    except: return "AI 호출 오류"
+
+def get_4_options(prompt):
+    try:
+        res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":f"{prompt}. 4가지만 명사형으로 간결하게 답해줘. 설명 금지."}])
+        lines = [l.strip().lstrip("-1234. ").strip() for l in res.choices[0].message.content.split('\n') if l.strip()]
+        return lines[:4]
+    except: return ["제안 실패"]
 
 def check_and_deduct(cost):
     if st.session_state['user_energy'] >= cost:
         st.session_state['user_energy'] -= cost
         return True
-    st.error(f"⚠️ 에너지가 부족합니다. (필요: {cost})"); return False
+    st.error("에너지가 부족합니다."); return False
 
-# -----------------------------------------------------------
-# 3. AI 조교 '다온' 핵심 로직
-# -----------------------------------------------------------
-openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
-genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
+# --- 3. 세션 초기화 (NameError 방지) ---
+if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+if 'user_energy' not in st.session_state: st.session_state['user_energy'] = 500
+if 'research_context' not in st.session_state:
+    st.session_state['research_context'] = {'topic':'', 'variables_options':[], 'variables':'', 'method_options':[], 'method':'', 'references':''}
+if 'paper_sections' not in st.session_state:
+    st.session_state['paper_sections'] = {"서론":"", "이론적 배경":"", "연구 방법":"", "결과":"", "논의":""}
+if 'confirm_state' not in st.session_state: st.session_state['confirm_state'] = {"type": None, "data": None}
+for k in ["chat_0", "chat_1", "chat_2", "chat_3", "chat_4", "chat_5"]:
+    if k not in st.session_state: st.session_state[k] = []
 
-def chat_with_daon(prompt, context_data, stage_name):
-    try:
-        sys_msg = f"당신은 심리학 연구 조교 '다온'입니다. 현재 단계: {stage_name}. 화면 내용: {context_data}. 전문적이고 친절하게 답하세요."
-        res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system","content":sys_msg},{"role":"user","content":prompt}])
-        return res.choices[0].message.content
-    except: return "AI 조교와 연결할 수 없습니다."
-
-def get_ai_suggestions(prompt):
-    try:
-        sys_msg = "4개의 대안을 제안하세요. 각 안은 '|||' 구분자로 나누고 설명 없이 제목 위주로 작성하세요."
-        res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system","content":sys_msg},{"role":"user","content":prompt}])
-        return [opt.strip() for opt in res.choices[0].message.content.split("|||") if opt.strip()][:4]
-    except: return ["제안 실패"]
-
-# -----------------------------------------------------------
-# 4. 세션 및 상태 관리
-# -----------------------------------------------------------
-if 'logged_in' not in st.session_state: st.session_state.logged_in = False
-if 'user_energy' not in st.session_state: st.session_state.user_energy = 500
-if 'confirm_state' not in st.session_state: st.session_state.confirm_state = {"type": None, "data": None}
-
-for key in ['topic', 'v_opts', 'v_final', 'm_opts', 'm_final', 'refs']:
-    if key not in st.session_state: st.session_state[key] = [] if 'opts' in key else ""
-if 'paper' not in st.session_state: st.session_state.paper = {"서론": "", "이론적 배경": "", "연구 방법": "", "결과": "", "논의": ""}
-for i in range(6):
-    if f"chat_{i}" not in st.session_state: st.session_state[f"chat_{i}"] = []
-
-# -----------------------------------------------------------
-# 5. UI 렌더링 함수
-# -----------------------------------------------------------
-def render_side_chat(idx, context, name):
-    st.markdown(f"###### 💬 AI 조교 다온 ({name})")
-    for m in st.session_state[f"chat_{idx}"]:
-        with st.chat_message(m["role"]): st.markdown(m["content"])
-    if p := st.chat_input(f"질문 ({PRICES['side_chat']}E)", key=f"input_{idx}"):
-        if check_and_deduct(PRICES['side_chat']):
-            st.session_state[f"chat_{idx}"].append({"role":"user","content":p})
+# --- 4. 화면 구성 함수 ---
+def render_right_chat(key_suffix, context_data, stage_name):
+    st.markdown(f"###### 💬 AI 조교 ({stage_name})")
+    cost = PRICES["side_chat"]
+    chat_key = f"chat_{key_suffix}"
+    for msg in st.session_state[chat_key]:
+        with st.chat_message(msg["role"]): st.markdown(msg["content"])
+    if p := st.chat_input(f"질문 (비용: {cost}E)", key=f"in_{key_suffix}"):
+        if check_and_deduct(cost):
+            st.session_state[chat_key].append({"role":"user", "content":p})
+            log_to_sheet(st.session_state['username'], f"질문({stage_name})", p)
             with st.chat_message("user"): st.markdown(p)
-            ans = chat_with_daon(p, context, name)
-            st.session_state[f"chat_{idx}"].append({"role":"assistant","content":ans})
-            log_to_sheet(st.session_state.username, f"조교질문({name})", p)
+            ans = chat_with_context(p, context_data, stage_name)
+            st.session_state[chat_key].append({"role":"assistant", "content":ans})
+            log_to_sheet(st.session_state['username'], f"답변({stage_name})", ans)
             st.rerun()
 
 def main_app():
-    user = st.session_state.username
+    user = st.session_state['username']
     with st.sidebar:
-        st.header(f"👤 {user}")
-        st.markdown("---")
-        st.subheader("📅 연구 기록")
-        d = st.date_input("날짜 선택")
+        st.header(f"👤 {user}님")
+        d = st.date_input("연구 기록 날짜")
         if st.button("기록 불러오기"):
-            st.session_state.history = fetch_logs_by_date(user, d.strftime("%Y-%m-%d"))
-            st.session_state.h_date = d.strftime("%Y-%m-%d")
-        if 'history' in st.session_state and st.session_state.history:
-            buf = create_word_report(user, st.session_state.h_date, st.session_state.history)
-            st.download_button("📄 워드 다운로드", buf, f"MJP_{st.session_state.h_date}.docx")
+            st.session_state['fetched_logs'] = fetch_logs(user, d.strftime("%Y-%m-%d"))
+            st.session_state['fetched_date'] = d.strftime("%Y-%m-%d")
         
+        st.markdown("---")
         if st.button("💾 오늘의 기록 저장"):
-            log_to_sheet(user, "수동저장", f"주제: {st.session_state.topic}\n변인: {st.session_state.v_final}")
-            st.success("저장 완료!"); time.sleep(1); st.rerun()
-            
-        if user == "zenova90": #
+            log_to_sheet(user, "수동저장", str(st.session_state['research_context']))
+            st.success("저장 완료!"); time.sleep(0.5); st.rerun()
+        
+        if user == "zenova90":
             st.markdown("---")
-            st.link_button("📂 관리자 시트 열기", "https://docs.google.com/spreadsheets/d/1XshK969D36k74uR7N_uG8Pst0S-k7oK4fD1E-6Y_iCg/")
-            
-        if st.button("로그아웃"): st.session_state.logged_in = False; st.rerun()
+            st.error("🔒 관리자 전용")
+            st.link_button("📂 관리자 시트 열기", "https://docs.google.com/spreadsheets")
+        
+        if st.button("로그아웃"): st.session_state['logged_in'] = False; st.rerun()
 
     st.title("🎓 MJP Research Lab")
-    st.markdown(f"<div class='energy-box'>⚡ Available Energy: <span class='energy-val'>{st.session_state.user_energy}</span></div>", unsafe_allow_html=True)
-    
-    tabs = st.tabs(["💡 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. APA", "📜 로그"])
+    st.markdown(f"<div class='energy-box'>⚡ Energy: <span class='energy-val'>{st.session_state['user_energy']}</span></div>", unsafe_allow_html=True)
+    tabs = st.tabs(["💡 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. 참고", "📜 로그"])
 
-    with tabs[0]: # 토론
-        render_side_chat(0, "주제 구상 중", "브레인스토밍")
-
-    with tabs[1]: # 변인
-        L, R = st.columns([6, 4])
-        with L:
-            st.session_state.topic = st.text_input("연구 주제", value=st.session_state.topic)
-            if st.button("🤖 4가지 안 제안 (무료)"):
-                st.session_state.v_opts = get_ai_suggestions(f"주제 '{st.session_state.topic}' 변인 구조 제안")
-            if st.session_state.v_opts:
-                pick = st.radio("안 선택", st.session_state.v_opts)
-                if st.button("적용하기"): st.session_state.confirm_state = {"type": "v", "data": pick}
-            
-            if st.session_state.confirm_state["type"] == "v":
-                st.markdown(f"<div class='confirm-box'>💰 {PRICES['var_confirm']}E 차감됩니다.</div>", unsafe_allow_html=True)
-                if st.button("✅ 결제 및 적용"):
+    with tabs[1]: # 변인 단계
+        cL, cR = st.columns([6, 4])
+        with cL:
+            st.subheader("Variables")
+            topic = st.text_input("연구 주제", value=st.session_state['research_context']['topic'])
+            if st.button("🤖 4가지 안 제안 (무료)", key="btn_v_free"):
+                with st.spinner("제안 생성 중..."):
+                    st.session_state['research_context']['variables_options'] = get_4_options(f"주제 '{topic}' 변인 구조")
+                    st.session_state['research_context']['topic'] = topic; st.rerun()
+            if st.session_state['research_context']['variables_options']:
+                choice = st.radio("안 선택:", st.session_state['research_context']['variables_options'])
+                if st.button("적용하기"): st.session_state['confirm_state'] = {"type":"var", "data":choice}; st.rerun()
+            if st.session_state['confirm_state']['type'] == "var":
+                st.markdown(f"<div class='confirm_box'>💰 {PRICES['var_confirm']}E 차감됩니다.</div>", unsafe_allow_html=True)
+                c1, c2 = st.columns(2)
+                if c1.button("✅ 최종 확정"):
                     if check_and_deduct(PRICES['var_confirm']):
-                        st.session_state.v_final = st.session_state.confirm_state["data"]
-                        st.session_state.confirm_state = {"type": None, "data": None}
-                        log_to_sheet(user, "변인확정", st.session_state.v_final); st.rerun()
-            st.text_area("확정된 변인", value=st.session_state.v_final)
-        with R: render_side_chat(1, f"주제:{st.session_state.topic}\n변인:{st.session_state.v_final}", "변인설계")
+                        st.session_state['research_context']['variables'] = st.session_state['confirm_state']['data']
+                        log_to_sheet(user, "변인확정", st.session_state['confirm_state']['data'])
+                        st.session_state['confirm_state'] = {"type":None, "data":None}; st.rerun()
+                if c2.button("❌ 취소"): st.session_state['confirm_state'] = {"type":None, "data":None}; st.rerun()
+            st.text_area("최종 변인", value=st.session_state['research_context']['variables'], height=150)
+        with cR: render_right_chat("1", f"주제:{topic}\n변인:{st.session_state['research_context']['variables']}", "변인")
 
-    with tabs[2]: # 방법론
-        L, R = st.columns([6, 4])
-        with L:
-            if st.button("🤖 방법론 제안 (무료)"):
-                st.session_state.m_opts = get_ai_suggestions(f"변인 '{st.session_state.v_final}' 적합한 연구방법")
-            if st.session_state.m_opts:
-                pick = st.radio("방법론 선택", st.session_state.m_opts)
-                if st.button("방법론 적용"): st.session_state.confirm_state = {"type": "m", "data": pick}
-            
-            if st.session_state.confirm_state["type"] == "m":
-                st.markdown(f"<div class='confirm-box'>💰 {PRICES['method_confirm']}E 차감됩니다.</div>", unsafe_allow_html=True)
-                if st.button("✅ 결제/적용"):
-                    if check_and_deduct(PRICES['method_confirm']):
-                        st.session_state.m_final = st.session_state.confirm_state["data"]
-                        st.session_state.confirm_state = {"type": None, "data": None}
-                        log_to_sheet(user, "방법확정", st.session_state.m_final); st.rerun()
-            st.text_area("확정된 방법", value=st.session_state.m_final)
-        with R: render_side_chat(2, f"방법:{st.session_state.m_final}", "방법론설계")
+    with tabs[5]: # 참고문헌 (APA)
+        cL, cR = st.columns([6, 4])
+        with cL:
+            st.subheader("References")
+            cost = PRICES['ref']
+            if st.button(f"✨ APA 변환 ({cost}E)"):
+                if not st.session_state['research_context']['references']:
+                    st.warning("⚠️ 참고문헌 데이터가 없습니다. 먼저 검색을 완료하세요.")
+                else:
+                    if check_and_deduct(cost):
+                        res = chat_with_context("APA 스타일로 변환해줘", st.session_state['research_context']['references'], "참고문헌")
+                        st.markdown(res)
+        with cR: render_right_chat("5", st.session_state['research_context']['references'], "참고")
 
-    with tabs[3]: # 검색
-        L, R = st.columns([6, 4])
-        with L:
-            if st.button(f"🚀 Gemini 검색 ({PRICES['search']}E)"):
-                if check_and_deduct(PRICES['search']):
-                    st.session_state.refs = search_literature(st.session_state.topic, st.session_state.v_final)
-                    log_to_sheet(user, "선행연구검색", st.session_state.refs); st.rerun()
-            st.text_area("검색 결과", value=st.session_state.refs, height=400)
-        with R: render_right_chat(3, st.session_state.refs, "연구검색")
-
-    with tabs[4]: # 작성
-        L, R = st.columns([6, 4])
-        with L:
-            sec = st.selectbox("챕터 선택", list(st.session_state.paper.keys()))
-            if st.button(f"✍️ AI 작성 ({PRICES['draft']}E)"):
-                if check_and_deduct(PRICES['draft']):
-                    with st.spinner("작성 중..."):
-                        txt = chat_with_daon(f"'{sec}' 챕터 학술적 작성", str(st.session_state.refs), "논문작성")
-                        st.session_state.paper[sec] = txt
-                        log_to_sheet(user, f"작성({sec})", txt); st.rerun()
-            st.session_state.paper[sec] = st.text_area("에디터", value=st.session_state.paper[sec], height=400)
-        with R: render_right_chat(4, st.session_state.paper[sec], "논문집필")
-
-    with tabs[5]: # APA
-        L, R = st.columns([6, 4])
-        with L:
-            if st.button(f"✨ APA 스타일 변환 ({PRICES['ref']}E)"):
-                if not st.session_state.refs.strip(): st.warning("⚠️ 변환할 내용이 없습니다.")
-                elif check_and_deduct(PRICES['ref']):
-                    apa = chat_with_daon("APA 스타일로 변환해줘", st.session_state.refs, "참고문헌")
-                    st.markdown(apa); log_to_sheet(user, "APA변환", apa)
-        with R: render_right_chat(5, st.session_state.refs, "문헌정리")
-
-    with tabs[6]:
-        logs = fetch_logs_by_date(user, datetime.datetime.now().strftime("%Y-%m-%d"))
-        for l in logs: st.markdown(f"<div class='log-entry'><b>{l['time']}</b> [{l['action']}] {l['content'][:100]}...</div>", unsafe_allow_html=True)
-
-# 로그인/회원가입 페이지
-if not st.session_state.logged_in:
+if st.session_state['logged_in']: main_app()
+else:
     st.title("🔐 MJP Research Lab")
     t1, t2 = st.tabs(["로그인", "회원가입"])
     with t1:
-        with st.form("L"):
-            u, p = st.text_input("ID"), st.text_input("PW", type="password")
-            if st.form_submit_button("접속"):
-                db = fetch_users_from_sheet()
-                if u in db and db[u] == p:
-                    st.session_state.logged_in, st.session_state.username = True, u
-                    log_to_sheet(u, "로그인", "성공"); st.rerun()
-                else: st.error("정보 불일치")
+        with st.form("login"):
+            uid = st.text_input("아이디"); upw = st.text_input("비밀번호", type="password")
+            if st.form_submit_button("로그인"):
+                users = fetch_users()
+                if uid in users and users[uid] == upw:
+                    st.session_state['logged_in'] = True; st.session_state['username'] = uid; st.rerun()
+                else: st.error("로그인 실패")
     with t2:
-        with st.form("S"):
-            nu, np = st.text_input("새 ID"), st.text_input("새 PW", type="password")
-            if st.form_submit_button("가입"):
-                s, m = register_user_to_sheet(nu, np)
+        with st.form("signup"):
+            nid = st.text_input("희망 아이디"); npw = st.text_input("희망 비밀번호", type="password")
+            if st.form_submit_button("가입하기"):
+                s, m = register_user(nid, npw)
                 if s: st.success(m)
                 else: st.error(m)
-else: main_app()
