@@ -12,12 +12,9 @@ import time
 def sync_to_google_sheet(sheet_name, data_list):
     try:
         import gspread
-        # 비밀키가 없으면 조용히 무시 (앱 멈춤 방지)
         if "gcp_service_account" not in st.secrets:
             return 
-        
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
-        # 파일 이름이 틀려도 앱은 안 꺼지게 예외처리
         try:
             sh = gc.open("MJP 연구실 관리대장")
             worksheet = sh.worksheet(sheet_name)
@@ -25,7 +22,7 @@ def sync_to_google_sheet(sheet_name, data_list):
         except:
             return 
     except Exception:
-        pass # 어떤 에러가 나도 앱은 살린다.
+        pass 
 
 # -----------------------------------------------------------
 # 2. 데이터 관리 및 로그인 (파일 DB)
@@ -42,27 +39,23 @@ def load_users():
     try:
         with open(USER_FILE, "r", encoding="utf-8") as f: return json.load(f)
     except:
-        return {"admin": "1234"} # 파일 깨짐 방지용 기본값
+        return {"admin": "1234"} 
 
 def save_new_user(new_id, new_pw):
     users = load_users()
     if new_id in users: return False, "❌ 이미 존재하는 아이디입니다."
     users[new_id] = new_pw
     with open(USER_FILE, "w", encoding="utf-8") as f: json.dump(users, f)
-    
-    # 구글 시트 전송 (안전 모드)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sync_to_google_sheet("Users", [ts, new_id, "신규 등록"])
     return True, f"✅ 등록 완료!"
 
-# 로그 파일 관리
 def get_log_filename(username): return f"logs_{username}.json"
 
 def save_log(username, action, content):
     path = get_log_filename(username)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_entry = {"time": ts, "action": action, "content": content}
-    
     logs = []
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -70,8 +63,6 @@ def save_log(username, action, content):
             except: logs = []
     logs.insert(0, new_entry)
     with open(path, "w", encoding="utf-8") as f: json.dump(logs, f, ensure_ascii=False, indent=4)
-    
-    # 구글 시트 전송 (안전 모드)
     sync_to_google_sheet("Logs", [ts, username, action, content])
 
 def load_logs(username):
@@ -87,12 +78,11 @@ def load_logs(username):
 # -----------------------------------------------------------
 st.set_page_config(page_title="MJP Lab", layout="wide")
 
-# 모든 변수가 확실히 있는지 검사하고 없으면 만듦
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'username' not in st.session_state: st.session_state['username'] = ""
 if 'user_energy' not in st.session_state: st.session_state['user_energy'] = 0
 
-# 연구 데이터 구조 복구
+# 연구 데이터 구조 복구 (Image 1 에러 해결)
 if 'research_context' not in st.session_state: st.session_state['research_context'] = {}
 required_keys = ['topic', 'variables_options', 'variables', 'method_options', 'method', 'references']
 for key in required_keys:
@@ -105,7 +95,6 @@ if 'paper_sections' not in st.session_state:
 if "chat_history_step0" not in st.session_state: st.session_state.chat_history_step0 = []
 if "messages_helper" not in st.session_state: st.session_state.messages_helper = []
 
-# API 키 (없으면 빈 문자열)
 openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
 genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
 
@@ -120,7 +109,6 @@ def check_and_deduct(cost):
 
 def simple_chat(prompt, ctx=""):
     try:
-        # OpenAI 키가 없으면 에러 방지용 가짜 응답
         if not openai.api_key: return "⚠️ OpenAI API 키가 설정되지 않았습니다."
         res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":f"{ctx}\n{prompt}"}])
         return res.choices[0].message.content
@@ -149,7 +137,6 @@ def login_page():
 def main_app():
     user = st.session_state['username']
     
-    # 사이드바
     with st.sidebar:
         st.header(f"👤 {user}")
         if st.button("로그아웃"): 
@@ -165,8 +152,6 @@ def main_app():
                     st.success("충전 완료!")
                 else: st.error("유효하지 않은 코드")
         
-        # 관리자 메뉴
-        st.markdown("---")
         with st.expander("⚙️ 회원 관리"):
             new_id = st.text_input("추가할 ID")
             new_pw = st.text_input("추가할 PW", type="password")
@@ -178,13 +163,13 @@ def main_app():
     st.title("🎓 MJP Research Lab")
     st.write(f"⚡ Energy: **{st.session_state['user_energy']}**")
 
-    # 탭 구성 (고유 키 적용하여 에러 방지)
     tabs = st.tabs(["💡 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. 참고", "📜 기록"])
 
     with tabs[0]:
         st.header("Brainstorming")
         for m in st.session_state.chat_history_step0:
              with st.chat_message(m["role"]): st.markdown(m["content"])
+        # [DuplicateId 방지] key를 명확하게 지정 (Image 3 에러 해결)
         if p := st.chat_input("아이디어 토론...", key="chat_tab_0"):
             if check_and_deduct(20):
                 st.session_state.chat_history_step0.append({"role":"user","content":p})
@@ -204,13 +189,11 @@ def main_app():
             save_log(user, "변인확정", v)
             st.success("저장되었습니다.")
         
-        # 간단 옵션 제안 (오류 방지용)
         if st.button("AI 제안 (50E)", key="btn_suggest_vars"):
             if check_and_deduct(50):
                 st.info("AI 제안 기능 작동 (화면 갱신)")
                 st.session_state['research_context']['variables_options'] = ["1안: 예시", "2안: 예시"]
 
-    # 나머지 탭들은 UI 구조상 에러 없음. (필요 시 복사됨)
     with tabs[2]: st.write("## 2단계: 방법론")
     with tabs[3]: st.write("## 3단계: 검색")
     with tabs[4]: st.write("## 4단계: 작성")
