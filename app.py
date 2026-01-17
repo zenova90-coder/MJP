@@ -1,10 +1,13 @@
 import streamlit as st
 import openai
 import google.generativeai as genai
+import gspread
 import datetime
 import json
 import os
 import time
+from docx import Document
+from io import BytesIO
 
 # -----------------------------------------------------------
 # 1. 스타일 & 기본 설정
@@ -24,118 +27,125 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------
-# 2. 시스템 함수 (안전 모드 유지)
+# 2. 구글 시트 DB 연결 (핵심: 영구 저장소)
 # -----------------------------------------------------------
-def sync_to_google_sheet(sheet_name, data_list):
+@st.cache_resource
+def get_google_sheet_connection():
+    """구글 시트 연결 객체 리턴 (캐싱으로 속도 향상)"""
     try:
-        import gspread
-        if "gcp_service_account" not in st.secrets: return 
+        if "gcp_service_account" not in st.secrets: return None
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
-        try:
-            sh = gc.open("MJP 연구실 관리대장")
-            worksheet = sh.worksheet(sheet_name)
-            worksheet.append_row(data_list)
-        except: return 
-    except: pass 
+        sh = gc.open("MJP 연구실 관리대장") # 시트 이름 정확해야 함
+        return sh
+    except Exception as e:
+        print(f"Sheet Connect Error: {e}")
+        return None
 
-USER_FILE = "users_db.json"
-
-def init_user_db():
-    if not os.path.exists(USER_FILE):
-        default_users = {"admin": "1234", "minju": "0000"}
-        with open(USER_FILE, "w", encoding="utf-8") as f: json.dump(default_users, f)
-
-def load_users():
-    if not os.path.exists(USER_FILE): init_user_db()
+def fetch_users_from_sheet():
+    """구글 시트 'Users' 탭에서 회원 명부 가져오기"""
+    sh = get_google_sheet_connection()
+    if not sh: return {"zenova90": "0931285asd*"} # 연결 실패 시 기본 관리자만
     try:
-        with open(USER_FILE, "r", encoding="utf-8") as f: return json.load(f)
-    except: return {"admin": "1234"} 
+        ws = sh.worksheet("Users")
+        # A열(ID), B열(PW) 읽기 (헤더 제외하고 읽기 위해 2행부터)
+        records = ws.get_all_values()
+        user_dict = {}
+        for row in records[1:]: # 첫줄 헤더 건너뜀
+            if len(row) >= 2:
+                user_dict[row[1]] = row[2] # B열: ID, C열: PW (구조에 따라 조정 필요, 여기선 A:날짜, B:ID, C:PW 가정)
+        
+        # 관리자 강제 추가 (혹시 시트에 없더라도 작동하게)
+        user_dict["zenova90"] = "0931285asd*"
+        return user_dict
+    except:
+        return {"zenova90": "0931285asd*"}
 
-def save_new_user(new_id, new_pw):
-    users = load_users()
-    if new_id in users: return False, "❌ 이미 존재하는 아이디입니다."
-    users[new_id] = new_pw
-    with open(USER_FILE, "w", encoding="utf-8") as f: json.dump(users, f)
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sync_to_google_sheet("Users", [ts, new_id, "신규 등록"])
-    return True, f"✅ '{new_id}'님 등록 완료!"
+def register_user_to_sheet(new_id, new_pw):
+    """구글 시트 'Users' 탭에 신규 회원 추가"""
+    sh = get_google_sheet_connection()
+    if not sh: return False, "구글 시트 연동 오류 (관리자 문의)"
+    
+    # 중복 체크
+    current_users = fetch_users_from_sheet()
+    if new_id in current_users:
+        return False, "❌ 이미 존재하는 아이디입니다."
+    
+    try:
+        ws = sh.worksheet("Users")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row([ts, new_id, new_pw]) # 날짜, ID, PW 순서
+        return True, "✅ 회원가입 완료! 로그인해주세요."
+    except Exception as e:
+        return False, f"가입 실패: {e}"
 
-def get_log_filename(username): return f"logs_{username}.json"
+def log_to_sheet(username, action, content):
+    """구글 시트 'Logs' 탭에 활동 기록 (영구 저장)"""
+    sh = get_google_sheet_connection()
+    if not sh: return
+    try:
+        ws = sh.worksheet("Logs")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 날짜(YYYY-MM-DD), 시간, ID, 액션, 내용
+        date_only = datetime.datetime.now().strftime("%Y-%m-%d")
+        ws.append_row([date_only, ts, username, action, content])
+    except: pass
 
-def save_log(username, action, content):
-    path = get_log_filename(username)
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_entry = {"time": ts, "action": action, "content": content}
-    logs = []
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            try: logs = json.load(f)
-            except: logs = []
-    logs.insert(0, new_entry)
-    with open(path, "w", encoding="utf-8") as f: json.dump(logs, f, ensure_ascii=False, indent=4)
-    sync_to_google_sheet("Logs", [ts, username, action, content])
-
-def load_logs(username):
-    path = get_log_filename(username)
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            try: return json.load(f)
-            except: return []
-    return []
+def fetch_logs_by_date(username, target_date_str):
+    """특정 날짜의 로그를 구글 시트에서 가져오기"""
+    sh = get_google_sheet_connection()
+    if not sh: return []
+    try:
+        ws = sh.worksheet("Logs")
+        rows = ws.get_all_values()
+        # 헤더: Date, Time, User, Action, Content
+        filtered_logs = []
+        for row in rows[1:]:
+            if len(row) >= 5:
+                log_date = row[0] # A열: 날짜
+                log_user = row[2] # C열: 유저
+                if log_date == target_date_str and log_user == username:
+                    filtered_logs.append({
+                        "time": row[1],
+                        "action": row[3],
+                        "content": row[4]
+                    })
+        # 시간 역순 정렬 (최신이 위로)
+        return sorted(filtered_logs, key=lambda x: x['time'], reverse=True)
+    except: return []
 
 # -----------------------------------------------------------
-# 3. AI 및 채팅 함수 ("눈치" 기능 탑재)
+# 3. 워드 파일 생성 함수
+# -----------------------------------------------------------
+def create_word_report(username, date_str, logs):
+    doc = Document()
+    doc.add_heading(f'{username}님의 연구 일지', 0)
+    doc.add_paragraph(f'날짜: {date_str}')
+    
+    if not logs:
+        doc.add_paragraph("기록된 활동이 없습니다.")
+    else:
+        for log in logs:
+            doc.add_heading(f"[{log['time']}] {log['action']}", level=2)
+            doc.add_paragraph(log['content'])
+            doc.add_paragraph("-" * 30)
+            
+    # 메모리에 저장
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# -----------------------------------------------------------
+# 4. AI 및 설정 초기화
 # -----------------------------------------------------------
 openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
 genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
 
-def chat_with_context(prompt, context_data, stage_name):
-    """
-    context_data: 왼쪽 화면에 있는 내용 (변인, 옵션 등)
-    prompt: 사용자의 질문 (예: "1안이 어때?")
-    """
-    system_msg = f"""
-    당신은 심리학 연구 조교 '다온'입니다.
-    현재 단계: {stage_name}
-    
-    [사용자가 보고 있는 화면 내용]
-    {context_data}
-    
-    위 내용을 바탕으로 사용자의 질문에 답변하세요.
-    """
-    try:
-        if not openai.api_key: return "⚠️ API 키가 없습니다."
-        res = openai.chat.completions.create(
-            model="gpt-4o-mini", 
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return res.choices[0].message.content
-    except Exception as e: return f"AI 오류: {e}"
-
-def get_ai_options(prompt):
-    try:
-        res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}])
-        return [opt.strip() for opt in res.choices[0].message.content.split("|||") if opt.strip()]
-    except: return ["AI 제안 실패", "다시 시도하세요"]
-
-def search_literature(topic, vars_text):
-    try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        prompt = f"주제: {topic}, 변인: {vars_text}. 관련 선행연구 3개 검색 요약."
-        return model.generate_content(prompt).text
-    except: return "검색 오류"
-
-# -----------------------------------------------------------
-# 4. 세션 초기화
-# -----------------------------------------------------------
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'username' not in st.session_state: st.session_state['username'] = ""
-if 'user_energy' not in st.session_state: st.session_state['user_energy'] = 0
+if 'user_energy' not in st.session_state: st.session_state['user_energy'] = 500
 
-# 연구 데이터 복구
+# 컨텍스트 복구
 if 'research_context' not in st.session_state: st.session_state['research_context'] = {}
 keys = ['topic', 'variables_options', 'variables', 'method_options', 'method', 'references']
 for k in keys:
@@ -144,222 +154,242 @@ for k in keys:
         else: st.session_state['research_context'][k] = ""
 if 'paper_sections' not in st.session_state:
     st.session_state['paper_sections'] = {"서론": "", "이론적 배경": "", "연구 방법": "", "결과": "", "논의": ""}
-
-# 채팅 히스토리 (각 탭별로 분리!)
+# 채팅 기록
 chat_keys = ["chat_0", "chat_1", "chat_2", "chat_3", "chat_4", "chat_5"]
 for k in chat_keys:
     if k not in st.session_state: st.session_state[k] = []
 
 # -----------------------------------------------------------
-# 5. 메인 앱
+# 5. AI 함수
 # -----------------------------------------------------------
+def chat_with_context(prompt, context_data, stage_name):
+    try:
+        system_msg = f"당신은 심리학 연구 조교 '다온'입니다.\n단계: {stage_name}\n[화면 내용]\n{context_data}"
+        res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system","content":system_msg},{"role":"user","content":prompt}])
+        return res.choices[0].message.content
+    except Exception as e: return f"오류: {e}"
+
+def get_ai_options(prompt):
+    try:
+        res = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":prompt}])
+        return [opt.strip() for opt in res.choices[0].message.content.split("|||") if opt.strip()]
+    except: return ["오류 발생"]
+
+def search_literature(topic, vars_text):
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        return model.generate_content(f"주제: {topic}, 변인: {vars_text}. 선행연구 3개 검색 요약.").text
+    except: return "검색 오류"
+
 def check_and_deduct(cost):
     if st.session_state['user_energy'] >= cost:
         st.session_state['user_energy'] -= cost
         return True
     st.error(f"에너지가 부족합니다 (필요: {cost})"); return False
 
+# -----------------------------------------------------------
+# 6. 메인 화면 (로그인 & 앱)
+# -----------------------------------------------------------
 def login_page():
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.title("🔐 MJP Lab")
-        st.caption("연구원 전용 접속 시스템")
+    st.title("🔐 MJP Research Lab")
+    
+    tab1, tab2 = st.tabs(["로그인", "회원가입"])
+    
+    with tab1:
         with st.form("login_form"):
             uid = st.text_input("아이디")
             upw = st.text_input("비밀번호", type="password")
             if st.form_submit_button("로그인"):
-                users = load_users()
+                # 구글 시트에서 최신 유저 정보 가져오기
+                users = fetch_users_from_sheet()
                 if uid in users and users[uid] == upw:
                     st.session_state['logged_in'] = True
                     st.session_state['username'] = uid
-                    # [수정] 기본 토큰 500으로 변경
-                    if st.session_state['user_energy'] == 0: st.session_state['user_energy'] = 500
-                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    sync_to_google_sheet("Logs", [ts, uid, "로그인 성공", "-"])
+                    # 로그인 기록
+                    log_to_sheet(uid, "로그인", "접속 성공")
                     st.rerun()
-                else: st.error("로그인 정보 불일치")
+                else:
+                    st.error("아이디 또는 비밀번호가 잘못되었습니다.")
+    
+    with tab2:
+        st.write("새로운 연구원 등록")
+        with st.form("signup_form"):
+            new_id = st.text_input("사용할 아이디")
+            new_pw = st.text_input("사용할 비밀번호", type="password")
+            if st.form_submit_button("가입하기"):
+                if new_id and new_pw:
+                    suc, msg = register_user_to_sheet(new_id, new_pw)
+                    if suc: st.success(msg)
+                    else: st.error(msg)
+                else:
+                    st.warning("아이디와 비밀번호를 입력해주세요.")
 
 def render_right_chat(key_suffix, context_data, stage_name):
-    """오른쪽 사이드바 채팅창 (왼쪽 내용을 알고 있음)"""
     st.markdown(f"###### 💬 AI 조교 ({stage_name})")
-    st.caption("👈 왼쪽 내용을 바탕으로 대화합니다.")
-    
-    # 히스토리 출력
     chat_key = f"chat_{key_suffix}"
     for msg in st.session_state[chat_key]:
         with st.chat_message(msg["role"]): st.markdown(msg["content"])
-        
-    # 입력창
-    if prompt := st.chat_input("질문하기...", key=f"input_{key_suffix}"):
-        if check_and_deduct(10): # 채팅 비용 10
-            # 1. 사용자 질문 저장
+    if prompt := st.chat_input("질문...", key=f"in_{key_suffix}"):
+        if check_and_deduct(10):
             st.session_state[chat_key].append({"role":"user", "content":prompt})
-            save_log(st.session_state['username'], f"질문({stage_name})", prompt)
+            log_to_sheet(st.session_state['username'], f"질문({stage_name})", prompt)
             with st.chat_message("user"): st.markdown(prompt)
-            
-            # 2. AI 답변 생성 (컨텍스트 포함)
-            with st.spinner("생각 중..."):
+            with st.spinner("..."):
                 ans = chat_with_context(prompt, context_data, stage_name)
                 st.session_state[chat_key].append({"role":"assistant", "content":ans})
-                save_log(st.session_state['username'], f"답변({stage_name})", ans)
+                log_to_sheet(st.session_state['username'], f"답변({stage_name})", ans)
                 st.rerun()
 
 def main_app():
     user = st.session_state['username']
     
+    # [좌측 사이드바: 캘린더 & 관리자]
     with st.sidebar:
         st.header(f"👤 {user}님")
-        if st.button("로그아웃"): st.session_state['logged_in'] = False; st.rerun()
+        
+        # 1. 캘린더 (기록 열람)
         st.markdown("---")
-        with st.expander("⚡ 에너지 충전소"):
-            st.write("기업은행 010-2989-0076 (양민주)")
-            code = st.text_input("쿠폰 번호")
+        st.subheader("📅 연구 기록 열람")
+        search_date = st.date_input("날짜 선택")
+        
+        if st.button("기록 불러오기"):
+            date_str = search_date.strftime("%Y-%m-%d")
+            logs = fetch_logs_by_date(user, date_str)
+            if logs:
+                st.success(f"{len(logs)}건의 기록을 찾았습니다.")
+                st.session_state['fetched_logs'] = logs # 결과 저장
+                st.session_state['fetched_date'] = date_str
+            else:
+                st.info("해당 날짜의 기록이 없습니다.")
+        
+        # 워드 다운로드 (불러온 기록이 있을 때만)
+        if 'fetched_logs' in st.session_state and st.session_state['fetched_logs']:
+            docx = create_word_report(user, st.session_state['fetched_date'], st.session_state['fetched_logs'])
+            st.download_button(
+                label="📄 워드파일 다운로드",
+                data=docx,
+                file_name=f"Research_Log_{st.session_state['fetched_date']}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
+        # 2. 관리자 메뉴 (zenova90 전용)
+        if user == "zenova90":
+            st.markdown("---")
+            st.error("🔒 관리자 메뉴")
+            # 실제 시트 주소가 있으면 넣으세요. 없다면 구글 드라이브 메인으로 보냅니다.
+            st.link_button("📂 구글 스프레드시트 열기", "https://docs.google.com/spreadsheets")
+        
+        # 3. 충전소 & 로그아웃
+        st.markdown("---")
+        with st.expander("⚡ 충전소"):
+            code = st.text_input("쿠폰")
             if st.button("충전"):
                 if code == "TEST-1000":
                     st.session_state['user_energy'] += 1000
-                    save_log(user, "충전", "1000E")
-                    st.success("충전 완료!")
-                else: st.error("유효하지 않은 코드")
+                    log_to_sheet(user, "충전", "1000E")
+                    st.success("충전 완료")
         
-        with st.expander("⚙️ 회원 관리 (Admin)"):
-            new_id = st.text_input("신규 ID")
-            new_pw = st.text_input("신규 PW", type="password")
-            if st.button("회원 추가"):
-                suc, msg = save_new_user(new_id, new_pw)
-                if suc: st.success(msg)
-                else: st.error(msg)
+        if st.button("로그아웃"): 
+            st.session_state['logged_in'] = False
+            st.rerun()
 
+    # [메인 화면]
     st.title("🎓 MJP Research Lab")
-    st.markdown(f"""
-    <div class="energy-box">
-        <span>⚡ <b>Available Energy:</b></span>
-        <span class="energy-val">{st.session_state['user_energy']}</span>
-    </div>""", unsafe_allow_html=True)
+    st.markdown(f"<div class='energy-box'><span>⚡ Energy:</span><span class='energy-val'>{st.session_state['user_energy']}</span></div>", unsafe_allow_html=True)
 
-    tabs = st.tabs(["💡 0. 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. 참고", "📜 기록"])
+    tabs = st.tabs(["💡 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. 참고", "📜 오늘 기록"])
 
-    # [Tab 0: 토론] (전체 채팅)
     with tabs[0]:
-        st.header("💡 Brainstorming")
-        render_right_chat("0", "초기 아이디어 구상 단계입니다.", "0단계")
+        st.header("Brainstorming")
+        render_right_chat("0", "초기 아이디어 구상 단계", "0단계")
 
-    # [Tab 1: 변인] (화면 분할 적용)
     with tabs[1]:
         col_L, col_R = st.columns([6, 4])
-        
         with col_L:
-            st.subheader("🧠 Variables (작업공간)")
-            v = st.text_area("최종 변인", value=st.session_state['research_context']['variables'], height=150)
-            if st.button("✅ 저장", key="sv_v"): 
-                st.session_state['research_context']['variables']=v; save_log(user,"변인확정",v); st.success("저장됨")
+            st.subheader("Variables")
+            v = st.text_area("변인", value=st.session_state['research_context']['variables'])
+            if st.button("저장", key="s_v"): 
+                st.session_state['research_context']['variables']=v; log_to_sheet(user,"변인확정",v); st.success("Saved")
             
-            topic = st.text_input("연구 주제 (제안용)", value=st.session_state['research_context']['topic'])
-            if st.button("🤖 3가지 구조 제안 (50E)", key="ai_v"):
+            topic = st.text_input("주제", value=st.session_state['research_context']['topic'])
+            if st.button("AI 제안 (50E)", key="ai_v"):
                 if check_and_deduct(50):
-                    with st.spinner("생성 중..."):
-                        opts = get_ai_options(f"주제 '{topic}'에 적합한 변인 구조 3가지 제안 (구분자 |||)")
-                        st.session_state['research_context']['variables_options'] = opts
-                        st.session_state['research_context']['topic'] = topic
-                        st.rerun()
-            
-            if st.session_state['research_context']['variables_options']:
-                choice = st.radio("선택:", st.session_state['research_context']['variables_options'])
-                if st.button("🔼 적용하기", key="app_v"):
-                    st.session_state['research_context']['variables'] = choice
+                    opts = get_ai_options(f"주제 '{topic}' 변인 3개 추천")
+                    st.session_state['research_context']['variables_options'] = opts
                     st.rerun()
-        
+            if st.session_state['research_context']['variables_options']:
+                c = st.radio("선택", st.session_state['research_context']['variables_options'])
+                if st.button("적용", key="a_v"): st.session_state['research_context']['variables']=c; st.rerun()
         with col_R:
-            # [오른쪽 채팅] 왼쪽의 변인과 옵션 정보를 다 알고 있음
-            context_info = f"현재 주제: {topic}\n현재 변인: {v}\nAI 제안 옵션들: {st.session_state['research_context']['variables_options']}"
-            render_right_chat("1", context_info, "1단계(변인)")
+            render_right_chat("1", f"주제:{topic}\n변인:{v}", "1단계")
 
-    # [Tab 2: 방법] (화면 분할)
     with tabs[2]:
         col_L, col_R = st.columns([6, 4])
         with col_L:
-            st.subheader("📐 Methodology (작업공간)")
-            m_val = st.text_area("최종 방법", value=st.session_state['research_context']['method'], height=150)
-            if st.button("✅ 저장", key="sv_m"): 
-                st.session_state['research_context']['method']=m_val; save_log(user,"방법론확정",m_val); st.success("저장됨")
-            
-            if st.button("🤖 방법론 제안 (50E)", key="ai_m"):
+            st.subheader("Methodology")
+            m = st.text_area("방법", value=st.session_state['research_context']['method'])
+            if st.button("저장", key="s_m"): 
+                st.session_state['research_context']['method']=m; log_to_sheet(user,"방법확정",m); st.success("Saved")
+            if st.button("AI 제안 (50E)", key="ai_m"):
                 if check_and_deduct(50):
-                    with st.spinner("설계 중..."):
-                        opts = get_ai_options(f"변인 '{st.session_state['research_context']['variables']}'에 적합한 연구방법 3가지 (구분자 |||)")
-                        st.session_state['research_context']['method_options'] = opts
-                        st.rerun()
-            
-            if st.session_state['research_context']['method_options']:
-                choice_m = st.radio("선택:", st.session_state['research_context']['method_options'])
-                if st.button("🔼 적용하기", key="app_m"):
-                    st.session_state['research_context']['method'] = choice_m
+                    opts = get_ai_options(f"변인 '{st.session_state['research_context']['variables']}' 방법론 3개 추천")
+                    st.session_state['research_context']['method_options'] = opts
                     st.rerun()
-        
+            if st.session_state['research_context']['method_options']:
+                c = st.radio("선택", st.session_state['research_context']['method_options'])
+                if st.button("적용", key="a_m"): st.session_state['research_context']['method']=c; st.rerun()
         with col_R:
-            context_info = f"확정된 변인: {st.session_state['research_context']['variables']}\n현재 방법론: {m_val}\nAI 제안 옵션들: {st.session_state['research_context']['method_options']}"
-            render_right_chat("2", context_info, "2단계(방법)")
+            render_right_chat("2", f"방법:{m}", "2단계")
 
-    # [Tab 3: 검색] (화면 분할)
     with tabs[3]:
         col_L, col_R = st.columns([6, 4])
         with col_L:
-            st.subheader("🔍 Literature Search")
-            if st.button("🚀 Gemini 검색 (30E)", key="sch_g"):
+            st.subheader("Search")
+            if st.button("검색 (30E)", key="s_g"):
                 if check_and_deduct(30):
-                    with st.spinner("검색 중..."):
-                        res = search_literature(st.session_state['research_context']['topic'], st.session_state['research_context']['variables'])
-                        st.session_state['research_context']['references'] = res
-                        save_log(user, "선행연구검색", res)
-                        st.rerun()
-            st.text_area("검색 결과", value=st.session_state['research_context']['references'], height=400)
-        
-        with col_R:
-            context_info = f"검색된 선행연구 결과:\n{st.session_state['research_context']['references']}"
-            render_right_chat("3", context_info, "3단계(검색)")
+                    res = search_literature(st.session_state['research_context']['topic'], st.session_state['research_context']['variables'])
+                    st.session_state['research_context']['references'] = res
+                    log_to_sheet(user, "검색", res)
+                    st.rerun()
+            st.text_area("결과", value=st.session_state['research_context']['references'])
+        with col_R: render_right_chat("3", st.session_state['research_context']['references'], "3단계")
 
-    # [Tab 4: 작성] (화면 분할)
     with tabs[4]:
         col_L, col_R = st.columns([6, 4])
         with col_L:
-            st.subheader("✍️ Drafting")
+            st.subheader("Drafting")
             sec = st.selectbox("챕터", list(st.session_state['paper_sections'].keys()))
-            if st.button(f"🤖 {sec} 초안 작성 (100E)", key="wrt_ai"):
+            if st.button("AI 작성 (100E)", key="ai_w"):
                 if check_and_deduct(100):
-                    with st.spinner("작성 중..."):
-                        context_all = str(st.session_state['research_context'])
-                        draft = chat_with_context(f"참고문헌과 변인을 바탕으로 '{sec}' 챕터를 학술적으로 작성해줘.", context_all, "작성단계")
-                        st.session_state['paper_sections'][sec] = draft
-                        save_log(user, f"논문작성({sec})", draft)
-                        st.rerun()
-            
-            current = st.text_area("에디터", value=st.session_state['paper_sections'][sec], height=500)
-            if st.button("💾 내용 저장", key="sv_sec"):
-                st.session_state['paper_sections'][sec] = current
-                save_log(user, f"논문수정({sec})", current)
-                st.success("저장됨")
-        
-        with col_R:
-            context_info = f"현재 작성 중인 챕터: {sec}\n작성 내용:\n{st.session_state['paper_sections'][sec]}"
-            render_right_chat("4", context_info, "4단계(작성)")
+                    draft = chat_with_context(f"'{sec}' 작성해줘", str(st.session_state['research_context']), "작성")
+                    st.session_state['paper_sections'][sec] = draft
+                    log_to_sheet(user, f"작성({sec})", draft)
+                    st.rerun()
+            cur = st.text_area("에디터", value=st.session_state['paper_sections'][sec])
+            if st.button("저장", key="s_d"): st.session_state['paper_sections'][sec]=cur; log_to_sheet(user,f"수정({sec})", cur); st.success("Saved")
+        with col_R: render_right_chat("4", f"챕터:{sec}\n{st.session_state['paper_sections'][sec]}", "4단계")
 
-    # [Tab 5: 참고문헌] (화면 분할)
     with tabs[5]:
         col_L, col_R = st.columns([6, 4])
         with col_L:
-            st.subheader("📚 References")
-            if st.button("✨ APA 스타일 변환 (20E)", key="apa_btn"):
+            st.subheader("References")
+            if st.button("APA 변환 (20E)", key="apa"):
                 if check_and_deduct(20):
-                    res = chat_with_context("다음 내용을 APA 스타일로 정리해줘.", st.session_state['research_context']['references'], "참고문헌")
+                    res = chat_with_context("APA 변환해줘", st.session_state['research_context']['references'], "참고문헌")
                     st.markdown(res)
-        with col_R:
-            render_right_chat("5", f"참고문헌 원본:\n{st.session_state['research_context']['references']}", "5단계(참고문헌)")
+        with col_R: render_right_chat("5", st.session_state['research_context']['references'], "5단계")
 
-    # [Tab 6: 기록]
     with tabs[6]:
-        st.header(f"📜 {user}'s History")
-        logs = load_logs(user)
+        st.header("오늘의 활동 로그")
+        # 오늘 날짜 로그만 간단히 보여주기
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        if 'fetched_date' in st.session_state and st.session_state['fetched_date'] == today:
+             logs = st.session_state['fetched_logs']
+        else:
+             logs = fetch_logs_by_date(user, today)
+        
         for log in logs:
-            st.markdown(f"<div class='log-entry'><b>{log['time']}</b> [{log['action']}]<br>{log['content'][:100]}...</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='log-entry'><b>{log['time']}</b> [{log['action']}]<br>{log['content'][:60]}...</div>", unsafe_allow_html=True)
 
 if st.session_state['logged_in']: main_app()
 else: login_page()
