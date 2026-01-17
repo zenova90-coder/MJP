@@ -9,7 +9,7 @@ import time
 from docx import Document
 from io import BytesIO
 
-# --- 0. 가격표 및 스타일 (기존 유지) ---
+# --- 0. 가격표 및 스타일 ---
 PRICES = {
     "chat_step0": 10, "var_confirm": 25, "method_confirm": 30,
     "search": 30, "draft": 100, "ref": 30, "side_chat": 5
@@ -23,16 +23,13 @@ st.markdown("""<style>
     .confirm-box { padding: 15px; border: 2px solid #e74c3c; background-color: #fdedec; border-radius: 8px; margin: 10px 0; text-align: center; }
 </style>""", unsafe_allow_html=True)
 
-# --- 1. 구글 시트 DB 연동 (안전 로직 강화) ---
+# --- 1. 구글 시트 DB 연동 ---
 def get_gs_sh():
     try:
-        # Secrets 형식이 틀려도 앱이 죽지 않게 보호
         if "gcp_service_account" not in st.secrets: return None
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
         return gc.open("MJP 연구실 관리대장")
-    except Exception as e:
-        st.sidebar.error(f"DB 연결 오류: {str(e)[:50]}")
-        return None
+    except: return None
 
 def fetch_users():
     users = {"zenova90": "0931285asd*"}
@@ -47,7 +44,7 @@ def fetch_users():
 
 def register_user(nid, npw):
     sh = get_gs_sh()
-    if not sh: return False, "DB 연동 오류 (Secrets 설정을 확인하세요)"
+    if not sh: return False, "DB 연동 오류 (Secrets 확인)"
     users = fetch_users()
     if nid in users: return False, "❌ 이미 존재하는 ID입니다."
     try:
@@ -74,13 +71,10 @@ def fetch_logs(user, date_str):
         return [{"time": r[1], "action": r[3], "content": r[4]} for r in rows[1:] if r[0]==date_str and r[2]==user]
     except: return []
 
-# --- 2. AI 기능 (인식 오류 해결) ---
+# --- 2. AI 기능 ---
 def chat_ai(prompt, ctx, stage):
     try:
-        # API 키를 대소문자 상관없이 찾도록 보강
-        api_key = st.secrets.get("OPENAI_API_KEY") or st.secrets.get("openai_api_key")
-        if not api_key: return "⚠️ OpenAI API 키가 설정되지 않았습니다. Secrets를 확인하세요."
-        
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
         client = openai.OpenAI(api_key=api_key)
         res = client.chat.completions.create(
             model="gpt-4o-mini", 
@@ -91,13 +85,13 @@ def chat_ai(prompt, ctx, stage):
         )
         return res.choices[0].message.content
     except Exception as e:
-        return f"AI 서비스 일시 중단 (상세 오류: {str(e)})"
+        return f"AI 서비스 일시 중단 (오류: {str(e)})"
 
 def get_4_opts(p):
     try:
-        api_key = st.secrets.get("OPENAI_API_KEY") or st.secrets.get("openai_api_key")
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
         client = openai.OpenAI(api_key=api_key)
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":f"{p}. 4가지만 간결하게 답해."}])
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":f"{p}. 4가지만 명사형으로 간결하게 답해."}])
         lines = [l.strip().lstrip("-1234. ").strip() for l in res.choices[0].message.content.split('\n') if l.strip()]
         return lines[:4]
     except: return ["제안 실패"]
@@ -108,7 +102,7 @@ def check_energy(cost):
         return True
     st.error("에너지가 부족합니다."); return False
 
-# --- 3. 세션 및 렌더링 (사라진 대화창 완벽 방어) ---
+# --- 3. 세션 초기화 ---
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 if 'username' not in st.session_state: st.session_state.username = ""
 if 'user_energy' not in st.session_state: st.session_state.user_energy = 500
@@ -120,6 +114,7 @@ if 'confirm_state' not in st.session_state: st.session_state.confirm_state = {"t
 for i in range(6):
     if f'chat_{i}' not in st.session_state: st.session_state[f'chat_{i}'] = []
 
+# --- 4. 렌더링 함수 ---
 def render_chat(idx, ctx_data, stage):
     st.markdown(f"###### 💬 AI 다온 ({stage})")
     ckey = f'chat_{idx}'
@@ -134,12 +129,10 @@ def render_chat(idx, ctx_data, stage):
             log_to_sheet(st.session_state.username, f"채팅({stage})", p)
             st.rerun()
 
-# --- 4. 메인 앱 화면 ---
 def main_app():
     u = st.session_state.username
     with st.sidebar:
         st.header(f"👤 {u}님")
-        # [기존 기능 보존] 사이드바 구성 요소
         st.markdown("---")
         st.subheader("📅 연구 기록")
         d = st.date_input("날짜 선택")
@@ -170,10 +163,9 @@ def main_app():
     st.markdown(f"<div class='energy-box'>⚡ Energy: <span class='energy-val'>{st.session_state.user_energy}</span></div>", unsafe_allow_html=True)
     tabs = st.tabs(["💡 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. 참고"])
 
-    # 각 탭에 독립적인 대화창 확실히 배치
     with tabs[0]: render_chat(0, "초기 아이디어", "토론")
     
-    with tabs[1]: # 1. 변인
+    with tabs[1]: # 변인 단계
         L, R = st.columns([6, 4])
         with L:
             st.subheader("Variables")
@@ -194,7 +186,7 @@ def main_app():
             st.text_area("최종 변인", value=st.session_state.research_context['variables'], height=150)
         with R: render_chat(1, st.session_state.research_context['variables'], "변인")
 
-    with tabs[2]: # 2. 방법
+    with tabs[2]: # 방법 단계
         L, R = st.columns([6, 4])
         with L:
             st.subheader("Methodology")
@@ -214,12 +206,13 @@ def main_app():
             st.text_area("최종 방법", value=st.session_state.research_context['method'], height=150)
         with R: render_chat(2, st.session_state.research_context['method'], "방법론")
 
-    with tabs[3]: # 3. 검색
+    with tabs[3]: # 검색
         L, R = st.columns([6, 4])
         with L:
             st.subheader("Search")
             if st.button(f"🚀 검색 ({PRICES['search']}E)"):
                 if check_energy(PRICES['search']):
+                    genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
                     model = genai.GenerativeModel('gemini-2.5-flash')
                     res = model.generate_content(f"주제:{st.session_state.research_context['topic']} 선행연구 요약").text
                     st.session_state.research_context['references'] = res
@@ -227,7 +220,7 @@ def main_app():
             st.text_area("결과", value=st.session_state.research_context['references'], height=400)
         with R: render_chat(3, st.session_state.research_context['references'], "검색")
 
-    with tabs[4]: # 4. 작성
+    with tabs[4]: # 작성
         L, R = st.columns([6, 4])
         with L:
             st.subheader("Drafting")
@@ -244,7 +237,7 @@ def main_app():
             st.text_area("에디터", value=st.session_state.paper_sections[sec], height=400)
         with R: render_chat(4, st.session_state.paper_sections[sec], f"작성-{sec}")
 
-    with tabs[5]: # 5. 참고 (APA)
+    with tabs[5]: # 참고
         L, R = st.columns([6, 4])
         with L:
             st.subheader("APA")
