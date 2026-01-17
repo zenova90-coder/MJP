@@ -9,7 +9,7 @@ import time
 from docx import Document
 from io import BytesIO
 
-# --- [인증 정보 고정] 민주님이 주신 키를 직접 적용 ---
+# --- [인증 정보 고정] 민주님 맞춤형 ---
 GOOGLE_KEY = {
     "type": "service_account",
     "project_id": "mjpp-484616",
@@ -50,12 +50,12 @@ def fetch_users():
 
 def register_user(nid, npw):
     sh = get_gs_sh()
-    if not sh: return False, "DB 연동 오류"
+    if not sh: return False, "DB 연동 오류 (Secrets 확인)"
     if nid in fetch_users(): return False, "❌ 이미 존재하는 ID"
     try:
         ws = sh.worksheet("Users")
         ws.append_row([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), nid, npw])
-        return True, "✅ 가입 성공!"
+        return True, "✅ 가입 성공! 로그인 하세요."
     except: return False, "가입 실패"
 
 def log_to_sheet(u, a, c):
@@ -66,13 +66,16 @@ def log_to_sheet(u, a, c):
         ws.append_row([datetime.datetime.now().strftime("%Y-%m-%d"), datetime.datetime.now().strftime("%H:%M:%S"), u, a, str(c)])
     except: pass
 
-def fetch_logs(u, d):
+def load_last_context(u):
     sh = get_gs_sh()
-    if not sh: return []
+    if not sh: return None
     try:
         ws = sh.worksheet("Logs")
-        return [{"time": r[1], "action": r[3], "content": r[4]} for r in ws.get_all_values()[1:] if r[0]==d and r[2]==u]
-    except: return []
+        rows = ws.get_all_values()
+        for r in reversed(rows):
+            if r[2] == u and r[3] == "수동저장": return eval(r[4])
+        return None
+    except: return None
 
 # --- 2. AI 기능 ---
 def chat_ai(prompt, ctx, stage):
@@ -80,7 +83,7 @@ def chat_ai(prompt, ctx, stage):
         client = openai.OpenAI(api_key=OAI_KEY)
         res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system","content":f"심리연구조교 다온. 단계:{stage}\n{ctx}"},{"role":"user","content":prompt}])
         return res.choices[0].message.content
-    except Exception as e: return f"오류: {e}"
+    except Exception as e: return f"AI 오류: {e}"
 
 def get_4_opts(p):
     try:
@@ -104,7 +107,7 @@ if 'confirm_state' not in st.session_state: st.session_state.confirm_state = {"t
 for i in range(6):
     if f'chat_{i}' not in st.session_state: st.session_state[f'chat_{i}'] = []
 
-# --- 4. 렌더링 함수 (NameError 수정됨) ---
+# --- 4. 렌더링 함수 ---
 def render_chat(idx, ctx_data, stage):
     st.markdown(f"###### 💬 AI 다온 ({stage})")
     ckey = f'chat_{idx}'
@@ -124,27 +127,23 @@ def main_app():
     with st.sidebar:
         st.header(f"👤 {u}님")
         st.markdown("---")
-        st.subheader("📅 연구 기록")
-        d = st.date_input("날짜 선택")
-        if st.button("기록 불러오기"):
-            st.session_state['fetched_logs'] = fetch_logs(u, d.strftime("%Y-%m-%d"))
-            st.session_state['fetched_date'] = d.strftime("%Y-%m-%d")
-        if st.button("💾 오늘의 기록 저장"):
+        if st.button("💾 데이터 즉시 저장"):
             log_to_sheet(u, "수동저장", str(st.session_state.research_context))
-            st.success("저장 완료!"); time.sleep(0.5); st.rerun()
-        with st.expander("⚡ 에너지 충전소"):
-            st.write("기업은행 010-2989-0076 (양민주)")
-            if st.text_input("쿠폰") == "TEST-1000" and st.button("충전"):
-                st.session_state.user_energy += 1000; log_to_sheet(u, "충전", "1000E"); st.rerun()
+            st.success("저장 완료!")
+        if st.button("🔄 마지막 기록 불러오기"):
+            last = load_last_context(u)
+            if last: st.session_state.research_context = last; st.success("복구 완료!"); st.rerun()
+            else: st.warning("기록이 없습니다.")
+        st.markdown("---")
         if u == "zenova90":
-            st.link_button("📂 시트 열기", "https://docs.google.com/spreadsheets")
+            st.link_button("📂 관리자 시트", "https://docs.google.com/spreadsheets")
         if st.button("로그아웃"): st.session_state.logged_in = False; st.rerun()
 
     st.title("🎓 MJP Research Lab")
     st.markdown(f"<div class='energy-box'>⚡ Energy: <span class='energy-val'>{st.session_state.user_energy}</span></div>", unsafe_allow_html=True)
     tabs = st.tabs(["💡 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. 참고"])
 
-    with tabs[0]: render_chat(0, "토론 단계", "토론")
+    with tabs[0]: render_chat(0, "초기 아이디어", "토론")
     with tabs[1]:
         L, R = st.columns([6, 4])
         with L:
@@ -166,30 +165,9 @@ def main_app():
             st.text_area("최종 변인", value=st.session_state.research_context['variables'], height=150)
         with R: render_chat(1, st.session_state.research_context['variables'], "변인")
 
-    with tabs[2]:
-        L, R = st.columns([6, 4])
-        with L:
-            st.subheader("Methodology")
-            if st.button("🤖 4가지 방법 제안 (무료)", key="m_free"):
-                st.session_state.research_context['method_options'] = get_4_opts(f"변인 '{st.session_state.research_context['variables']}' 연구방법")
-                st.rerun()
-            if st.session_state.research_context['method_options']:
-                c = st.radio("선택:", st.session_state.research_context['method_options'])
-                if st.button("적용하기", key="m_app"): st.session_state.confirm_state = {"type":"method", "data":c}; st.rerun()
-            if st.session_state.confirm_state['type'] == "method":
-                st.markdown(f"<div class='confirm-box'>💰 {PRICES['method_confirm']}E 차감</div>", unsafe_allow_html=True)
-                if st.button("✅ 확정 결제", key="m_pay"):
-                    if check_energy(PRICES['method_confirm']):
-                        st.session_state.research_context['method'] = st.session_state.confirm_state['data']
-                        log_to_sheet(u, "방법확정", st.session_state.confirm_state['data'])
-                        st.session_state.confirm_state = {"type":None, "data":None}; st.rerun()
-            st.text_area("최종 방법", value=st.session_state.research_context['method'], height=150)
-        with R: render_chat(2, st.session_state.research_context['method'], "방법")
-
     with tabs[3]:
         L, R = st.columns([6, 4])
         with L:
-            st.subheader("Search")
             if st.button(f"🚀 검색 ({PRICES['search']}E)"):
                 if check_energy(PRICES['search']):
                     genai.configure(api_key=GMN_KEY)
@@ -199,35 +177,6 @@ def main_app():
                     log_to_sheet(u, "검색", res); st.rerun()
             st.text_area("결과", value=st.session_state.research_context['references'], height=400)
         with R: render_chat(3, st.session_state.research_context['references'], "검색")
-
-    with tabs[4]:
-        L, R = st.columns([6, 4])
-        with L:
-            st.subheader("Drafting")
-            sec = st.selectbox("챕터", list(st.session_state.paper_sections.keys()))
-            if st.button("🤖 AI 초안 작성"): st.session_state.confirm_state = {"type":"draft", "data":sec}; st.rerun()
-            if st.session_state.confirm_state['type'] == "draft":
-                st.markdown(f"<div class='confirm-box'>💰 {PRICES['draft']}E 차감</div>", unsafe_allow_html=True)
-                if st.button("✅ 작성 시작"):
-                    if check_energy(PRICES['draft']):
-                        st.session_state.confirm_state = {"type":None, "data":None}
-                        draft = chat_ai(f"'{sec}' 작성해줘", str(st.session_state.research_context), "작성")
-                        st.session_state.paper_sections[sec] = draft
-                        log_to_sheet(u, f"작성({sec})", draft); st.rerun()
-            st.text_area("에디터", value=st.session_state.paper_sections[sec], height=400)
-        with R: render_chat(4, st.session_state.paper_sections[sec], "작성")
-
-    with tabs[5]:
-        L, R = st.columns([6, 4])
-        with L:
-            st.subheader("APA")
-            if st.button(f"✨ APA 변환 ({PRICES['ref']}E)"):
-                if not st.session_state.research_context['references']: st.warning("내용 없음")
-                else:
-                    if check_energy(PRICES['ref']):
-                        res = chat_ai("APA 변환해줘", st.session_state.research_context['references'], "참고")
-                        st.markdown(res)
-        with R: render_chat(5, st.session_state.research_context['references'], "참고")
 
 if st.session_state.logged_in: main_app()
 else:
