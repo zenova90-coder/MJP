@@ -18,7 +18,6 @@ st.markdown("""
     div.stButton > button:first-child:hover {
         background-color: #004b91;
     }
-    /* 토큰 표시 디자인 */
     .token-box {
         padding: 10px;
         background-color: #f0f2f6;
@@ -38,7 +37,6 @@ st.markdown("""
 # -----------------------------------------------------------
 # 2. 데이터 저장소 & 토큰 시스템 초기화
 # -----------------------------------------------------------
-# [NEW] 토큰 시스템
 if 'user_tokens' not in st.session_state:
     st.session_state['user_tokens'] = 1000  # 신규 가입 축하금
 
@@ -60,7 +58,7 @@ if "messages_helper" not in st.session_state:
     st.session_state.messages_helper = []
 
 # -----------------------------------------------------------
-# 3. 사이드바: 로그인 & 결제 시스템 (충전소)
+# 3. 사이드바: 로그인 & 결제 시스템 (내 계좌 적용!)
 # -----------------------------------------------------------
 with st.sidebar:
     st.header("🔐 연구실 입장")
@@ -72,30 +70,43 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # 💰 [NEW] 토큰 충전소
+    # 💰 토큰 충전소
     st.header("🔋 토큰 충전소")
-    
-    # 현재 잔액 표시 (사이드바)
     st.metric(label="현재 보유 토큰", value=f"{st.session_state['user_tokens']} T")
     
-    with st.expander("💳 토큰 충전하기 (결제)"):
-        st.write("토큰이 부족한가요? 아래 계좌로 입금 후 관리자에게 연락주세요.")
-        st.code("카카오뱅크 3333-XX-XXXXXX (예금주: 민주)") # [수정필요] 본인 계좌로 변경
-        st.markdown("[📲 카카오페이로 송금하기](https://qr.kakaopay.com/...)") # [수정필요] 링크 넣기
-        st.info("입금 후 받은 쿠폰 코드를 아래에 입력하세요.")
+    with st.expander("💳 토큰 충전하기 (입금 안내)"):
+        st.write("토큰이 부족하신가요? 아래 계좌로 입금 후 민주님에게 '충전 코드'를 요청하세요.")
         
-        # 쿠폰 입력 시스템
+        # [수정완료] 민주님의 기업은행 계좌 적용
+        st.code("기업은행 01029890076 (예금주: 양민주)")
+        
+        st.info("입금 확인 후 발급받은 코드를 아래에 입력하세요.")
+        
+        # [쿠폰 시스템 원리]
+        # 여기에 적힌 글자(비밀번호)가 바로 '쿠폰'입니다.
+        # 민주님이 이 글자를 친구에게 알려주면, 친구가 입력해서 충전하는 방식입니다.
         coupon = st.text_input("쿠폰 코드 입력")
+        
         if st.button("충전 적용"):
-            if coupon == "MJP-LOVE-2026":
+            # 1번 쿠폰: 테스트용
+            if coupon == "TEST-1000":
+                st.session_state['user_tokens'] += 1000
+                st.balloons()
+                st.success("1,000 토큰 충전 완료! (테스트)")
+            
+            # 2번 쿠폰: 친구용 (5,000원 어치)
+            elif coupon == "FRIEND-5000":
                 st.session_state['user_tokens'] += 5000
                 st.balloons()
-                st.success("5,000 토큰이 충전되었습니다!")
-            elif coupon == "ADMIN-POWER":
-                st.session_state['user_tokens'] += 10000
-                st.success("10,000 토큰 충전 완료!")
+                st.success("5,000 토큰이 충전되었습니다! 💖")
+                
+            # 3번 쿠폰: VIP용 (무제한급)
+            elif coupon == "VIP-POWER":
+                st.session_state['user_tokens'] += 50000
+                st.success("50,000 토큰 충전! VIP님 환영합니다. 👑")
+                
             else:
-                st.error("유효하지 않은 쿠폰입니다.")
+                st.error("유효하지 않은 코드입니다. 입금 후 문의해주세요.")
                 
     st.markdown("---")
     if st.button("🗑️ 초기화", type="primary"):
@@ -107,15 +118,14 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # -----------------------------------------------------------
-# 4. 기능 함수 (토큰 차감 로직 추가)
+# 4. 기능 함수
 # -----------------------------------------------------------
-# 토큰 차감 도우미 함수
 def check_and_deduct_tokens(cost):
     if st.session_state['user_tokens'] >= cost:
         st.session_state['user_tokens'] -= cost
         return True
     else:
-        st.error(f"토큰이 부족합니다! (필요: {cost}, 보유: {st.session_state['user_tokens']}) 사이드바에서 충전하세요.")
+        st.error(f"토큰 부족! (필요: {cost}, 보유: {st.session_state['user_tokens']}) 충전이 필요합니다.")
         return False
 
 def consult_variables_options(topic):
@@ -146,25 +156,19 @@ def organize_references_apa(raw_text):
     return response.choices[0].message.content
 
 # -----------------------------------------------------------
-# 5. [수정됨] 에러 없는 채팅 인터페이스 (Key 추가!)
+# 5. 채팅 인터페이스
 # -----------------------------------------------------------
 def render_chat_interface(stage_name, user_input_content, ai_suggestions_content="", unique_key="default"):
     st.markdown(f"#### 💬 AI 조교 ({stage_name})")
     st.caption("👈 왼쪽 내용을 다 보고 있습니다.")
     
     with st.container(height=450):
-        # 현재 단계에 맞는 대화만 보여주면 좋겠지만, 일단 전체 공유 (간소화)
         for message in st.session_state.messages_helper:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    # [핵심 수정] key=unique_key를 추가하여 중복 에러 해결!
     if prompt := st.chat_input("질문하기...", key=unique_key):
-        
-        # 채팅도 토큰 소모 (싸게 10토큰)
-        if not check_and_deduct_tokens(10):
-            st.stop()
-            
+        if not check_and_deduct_tokens(10): st.stop()
         st.session_state.messages_helper.append({"role": "user", "content": prompt})
         
         full_context = f"단계: {stage_name}\n내용: {user_input_content}\n옵션: {ai_suggestions_content}\n질문: {prompt}"
@@ -179,11 +183,10 @@ def render_chat_interface(stage_name, user_input_content, ai_suggestions_content
         st.rerun()
 
 # -----------------------------------------------------------
-# 6. 메인 화면 구성 (토큰 잔액 대시보드 추가)
+# 6. 메인 화면
 # -----------------------------------------------------------
 st.title("🎓 MJP: 연구 토론 & 설계 시스템 (Biz)")
 
-# [NEW] 중앙 토큰 대시보드
 st.markdown(f"""
 <div class="token-box">
     <span>💎 현재 보유 토큰: </span>
@@ -191,7 +194,6 @@ st.markdown(f"""
     <span style="font-size: 14px; color: gray;"> (AI 사용 시 차감됩니다)</span>
 </div>
 """, unsafe_allow_html=True)
-
 
 tabs = st.tabs(["💡 0. 토론", "1. 변인", "2. 방법", "3. 검색", "4. 작성", "5. 참고문헌"])
 
@@ -201,9 +203,8 @@ with tabs[0]:
     for msg in st.session_state.chat_history_step0:
         with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-    # [핵심 수정] key 추가
     if prompt := st.chat_input("아이디어 토론하기...", key="chat_tab0"):
-        if check_and_deduct_tokens(20): # 토론은 20토큰
+        if check_and_deduct_tokens(20):
             st.session_state.chat_history_step0.append({"role": "user", "content": prompt})
             with st.chat_message("user"): st.markdown(prompt)
             with st.chat_message("assistant"):
@@ -215,7 +216,7 @@ with tabs[0]:
                     )
                     st.markdown(res.choices[0].message.content)
                     st.session_state.chat_history_step0.append({"role": "assistant", "content": res.choices[0].message.content})
-                    st.rerun() # 잔액 갱신 위해
+                    st.rerun()
 
 # [Tab 1] 변인
 with tabs[1]:
@@ -243,7 +244,6 @@ with tabs[1]:
                 st.rerun()
 
     with col_chat:
-        # [핵심 수정] key="chat_tab1" 전달
         render_chat_interface("1단계", st.session_state['research_context']['variables'], 
                             str(st.session_state['research_context']['variables_options']), unique_key="chat_tab1")
 
