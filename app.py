@@ -3,30 +3,25 @@ import openai
 import google.generativeai as genai
 
 # -----------------------------------------------------------
-# 1. 기본 설정 & 세션(기억 저장소) 초기화
+# 1. 기본 설정 & 세션 초기화
 # -----------------------------------------------------------
-st.set_page_config(page_title="MJP: Interactive Research Partner", layout="wide")
+st.set_page_config(page_title="MJP 연구 파트너 (Pro Layout)", layout="wide")
 
-# [핵심] 논문의 각 챕터 내용을 따로따로 기억하는 저장소
+# 저장소 초기화
 if 'paper_sections' not in st.session_state:
     st.session_state['paper_sections'] = {
-        "서론": "",
-        "이론적 배경": "",
-        "연구 방법": "",
-        "결과": "",
-        "논의": ""
+        "서론": "", "이론적 배경": "", "연구 방법": "", "결과": "", "논의": ""
     }
 
-# 연구 설계 데이터 저장소
 if 'research_context' not in st.session_state:
     st.session_state['research_context'] = {
         'topic': '',
+        'variables_options': [], # 제안된 변인 옵션들을 저장할 곳
         'variables': '',
         'method': '',
         'references': ''
     }
 
-# 채팅 기록 저장소
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -54,13 +49,21 @@ genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 # 3. AI 두뇌 (기능 정의)
 # -----------------------------------------------------------
 
-def consult_variables(topic):
-    prompt = f"주제 '{topic}'에 적합한 독립, 종속, 조절/매개 변인 구조를 3개 제안해줘."
+def consult_variables_options(topic):
+    # [핵심] 클릭 선택을 위해 AI에게 "옵션 3개만 딱 줘"라고 시킴 (구분자 ||| 사용)
+    prompt = f"""
+    주제 '{topic}'에 적합한 변인 구조(독립/종속/매개 등)를 3가지 제안해주세요.
+    각 옵션은 '|||'로 구분해서 출력하세요. 설명은 짧게 핵심만.
+    예시:
+    1안: IV-A, DV-B, MV-C ||| 2안: IV-X, DV-Y... ||| 3안: ...
+    """
     response = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-    return response.choices[0].message.content
+    # 텍스트를 ||| 기준으로 쪼개서 리스트로 만듦
+    options = response.choices[0].message.content.split("|||")
+    return [opt.strip() for opt in options if opt.strip()]
 
 def design_methodology(vars_text):
-    prompt = f"변인 '{vars_text}'을 측정할 척도와 통계 분석 방법을 구체적으로 제안해줘."
+    prompt = f"변인 '{vars_text}'을 측정할 척도와 통계 분석 방법을 제안해줘."
     response = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
     return response.choices[0].message.content
 
@@ -73,145 +76,135 @@ def search_literature(topic, vars_text):
         return "검색 오류. 잠시 후 다시 시도하세요."
 
 def write_paper_final(section, context_data):
-    # [수정] 더 구체적이고 논리적인 글쓰기를 위한 지시 강화
     prompt = f"""
-    [역할]: 당신은 매우 비판적이고 논리적인 심리학 논문 작성자입니다.
-    [작업]: '{section}' 챕터 초안 작성.
-    [근거 데이터]: {context_data}
-    
-    [필수 지침]:
-    1. 추상적인 표현(예: '영향을 미쳤다')을 지양하고, 구체적인 기제나 논리를 서술할 것.
-    2. 문장 간의 인과관계가 명확해야 함. 비약이 없도록 주의할 것.
-    3. APA 스타일을 철저히 준수할 것.
+    [역할]: 논리적이고 비판적인 심리학 연구자.
+    [작업]: '{section}' 챕터 작성.
+    [근거]: {context_data}
+    [지침]: 구체적인 수치나 논리를 포함하여 APA 스타일로 작성.
     """
     response = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
     return response.choices[0].message.content
 
 def organize_references_apa(raw_text):
-    prompt = f"다음 텍스트에서 참고문헌을 추출하여 APA 7판 양식으로 변환하고 알파벳/가나다 순 정렬해줘:\n{raw_text}"
+    prompt = f"참고문헌 추출 -> APA 7판 변환 -> 알파벳/가나다 순 정렬:\n{raw_text}"
     response = openai.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
     return response.choices[0].message.content
 
 # -----------------------------------------------------------
-# 4. 화면 구성 (탭 6개)
+# 4. 화면 구성 (탭 5개 - 채팅 탭을 4단계로 통합!)
 # -----------------------------------------------------------
-st.title("🎓 MJP: 대화형 논문 작성 시스템 V2")
+st.title("🎓 MJP 연구 파트너 (Dual Mode)")
 
-tabs = st.tabs(["1. 변인", "2. 방법", "3. 검색", "4. 본문 작성(저장)", "5. 참고문헌", "💬 6. AI 피드백"])
+tabs = st.tabs(["1. 변인 선택", "2. 방법 설계", "3. 자료 검색", "4. 작성 & 피드백", "5. 참고문헌"])
 
-# [Tab 1~3] 설정 단계
+# [Tab 1] 변인 (클릭 선택 기능 추가!)
 with tabs[0]:
+    st.header("🧠 1단계: 변인 아이디어 선택")
     topic = st.text_input("연구 주제")
-    if st.button("변인 제안"):
-        st.markdown(consult_variables(topic))
-        st.session_state['research_context']['topic'] = topic
-    final_vars = st.text_area("변인 확정", key="v_input")
-    if st.button("변인 저장"): st.session_state['research_context']['variables'] = final_vars
+    
+    if st.button("변인 옵션 제안받기"):
+        with st.spinner("GPT가 3가지 연구 모형을 구상 중..."):
+            options = consult_variables_options(topic)
+            st.session_state['research_context']['variables_options'] = options
+            st.session_state['research_context']['topic'] = topic
+    
+    # 옵션이 생성되었으면 선택지(Radio Button)를 보여줌
+    if st.session_state['research_context']['variables_options']:
+        st.subheader("마음에 드는 연구 모형을 선택하세요:")
+        choice = st.radio(
+            "아래 옵션 중 하나를 클릭하세요:",
+            st.session_state['research_context']['variables_options']
+        )
+        
+        st.info(f"선택된 모형: {choice}")
+        
+        # 선택하면 자동으로 확정 칸에 채워넣기
+        if st.button("이 모형으로 확정 및 저장"):
+            st.session_state['research_context']['variables'] = choice
+            st.success("변인이 저장되었습니다! 2단계로 넘어가세요.")
 
+# [Tab 2] 방법
 with tabs[1]:
+    st.header("📐 2단계: 방법론")
     if st.button("방법론 제안"): st.markdown(design_methodology(st.session_state['research_context']['variables']))
     final_method = st.text_area("방법론 확정", key="m_input")
     if st.button("방법 저장"): st.session_state['research_context']['method'] = final_method
 
+# [Tab 3] 검색
 with tabs[2]:
+    st.header("🔍 3단계: 선행 연구")
     if st.button("Gemini 검색"):
         refs = search_literature(st.session_state['research_context']['topic'], st.session_state['research_context']['variables'])
         st.session_state['research_context']['references'] = refs
         st.text_area("검색 결과", refs)
 
 # -----------------------------------------------------------
-# [Tab 4] 본문 작성 (여기가 민주님 요청대로 대폭 수정됨!)
+# [Tab 4] 여기가 핵심! (에디터 + 챗봇 동시 화면)
 # -----------------------------------------------------------
 with tabs[3]:
-    st.header("✍️ 4단계: 본문 작성 (챕터별 독립 저장)")
+    st.header("✍️ 4단계: 실시간 작성 및 피드백")
     
-    # 1. 작성할 챕터 선택
-    target_section = st.selectbox("작성/편집할 챕터를 선택하세요", list(st.session_state['paper_sections'].keys()))
+    # 화면을 6:4 비율로 나눔 (왼쪽: 글쓰기 / 오른쪽: 채팅)
+    col_editor, col_chat = st.columns([6, 4])
     
-    col_a, col_b = st.columns([1, 5])
-    
-    # 2. AI 초안 생성 버튼
-    with col_a:
-        if st.button(f"🤖 AI 초안 생성"):
-            with st.spinner(f"{target_section} 작성 중..."):
-                # 검색된 자료가 없으면 경고
-                ref_data = st.session_state['research_context']['references']
-                if not ref_data:
-                    st.warning("3단계 검색 자료가 없습니다! 그냥 쓰면 내용이 부실할 수 있습니다.")
-                
-                draft = write_paper_final(target_section, ref_data)
-                # 생성된 내용을 해당 챕터 서랍에 넣기
+    # --- [왼쪽] 논문 에디터 ---
+    with col_editor:
+        st.subheader("📝 원고지 (Editor)")
+        target_section = st.selectbox("작성할 챕터", list(st.session_state['paper_sections'].keys()))
+        
+        if st.button("🤖 AI 초안 생성 (왼쪽)"):
+            with st.spinner("작성 중..."):
+                draft = write_paper_final(target_section, st.session_state['research_context']['references'])
                 st.session_state['paper_sections'][target_section] = draft
-                st.success("생성 완료!")
+        
+        # 에디터 창
+        current_text = st.text_area(
+            "내용 편집",
+            value=st.session_state['paper_sections'][target_section],
+            height=600
+        )
+        
+        if st.button("💾 내용 저장"):
+            st.session_state['paper_sections'][target_section] = current_text
+            st.success("저장됨")
 
-    # 3. 에디터 (생성된 글을 수정하거나 볼 수 있는 곳)
-    st.markdown(f"### 📝 {target_section} 편집기")
-    # 서랍에서 꺼내와서 보여줌
-    current_text = st.text_area(
-        label="내용을 직접 수정할 수 있습니다.",
-        value=st.session_state['paper_sections'][target_section],
-        height=500
-    )
-    
-    # 4. 저장 버튼
-    if st.button(f"💾 {target_section} 내용 저장"):
-        st.session_state['paper_sections'][target_section] = current_text
-        st.success(f"{target_section} 내용이 안전하게 저장되었습니다.")
+    # --- [오른쪽] AI 지도교수 (채팅) ---
+    with col_chat:
+        st.subheader("💬 지도교수 피드백")
+        st.info("왼쪽 글을 보고 수정사항을 말하세요.")
+        
+        # 채팅창 스타일링 (높이 제한)
+        with st.container(height=500):
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+        # 채팅 입력
+        if prompt := st.chat_input("예: 서론의 두 번째 문단 통계가 부족해."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            # AI 답변 생성
+            # [중요] 현재 에디터에 있는 글을 맥락으로 같이 보냄
+            full_context = f"""
+            [현재 사용자가 보고 있는 글 ({target_section})]:
+            {st.session_state['paper_sections'][target_section]}
+            
+            [사용자 요청]: {prompt}
+            """
+            
+            # 챗봇 응답 생성
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": "당신은 논문 지도교수입니다. 사용자의 요청에 따라 왼쪽의 글을 수정하거나 조언을 해주세요."}] + 
+                         [{"role": "user", "content": full_context}]
+            )
+            
+            ai_msg = response.choices[0].message.content
+            st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+            st.rerun() # 채팅 올라가게 새로고침
 
 # [Tab 5] 참고문헌
 with tabs[4]:
+    st.header("📚 5단계: 참고문헌")
     if st.button("APA 변환"):
         st.markdown(organize_references_apa(st.session_state['research_context']['references']))
-
-# -----------------------------------------------------------
-# [Tab 6] AI 실시간 피드백 (대화형)
-# -----------------------------------------------------------
-with tabs[5]:
-    st.header("💬 AI 논문 지도 교수 (피드백 & 수정)")
-    st.info("4단계에서 쓴 글이 마음에 안 들면 여기서 고쳐달라고 하세요. (예: '서론의 논리적 비약을 수정해줘')")
-
-    # 채팅 기록 표시
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # 사용자 입력
-    if prompt := st.chat_input("수정 요청 사항을 입력하세요..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            
-            # [중요] AI에게 현재까지 작성된 '모든 챕터의 내용'을 보여줍니다.
-            current_paper_status = "\n".join([f"[{k}]: {v[:200]}..." for k, v in st.session_state['paper_sections'].items()])
-            
-            full_context = f"""
-            [현재 연구 진행 상황]
-            - 주제: {st.session_state['research_context']['topic']}
-            - 변인: {st.session_state['research_context']['variables']}
-            - 현재 작성된 논문 요약:
-            {current_paper_status}
-            """
-            
-            # 지도교수 모드 발동
-            system_instruction = f"""
-            당신은 까다로운 심리학과 지도교수입니다.
-            학생(사용자)이 논문의 논리적 허점이나 구체성 부족을 지적하면, 
-            1. 그 지적이 타당한지 평가하고
-            2. 구체적인 예시나 문장을 포함하여 직접 수정안을 제시하세요.
-            3. 말투는 정중하지만 학술적으로 엄격하게 하세요.
-            
-            [배경 지식]: {full_context}
-            """
-            
-            response = openai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "system", "content": system_instruction}] + 
-                         [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-            )
-            
-            ai_response = response.choices[0].message.content
-            message_placeholder.markdown(ai_response)
-            st.session_state.messages.append({"role": "assistant", "content": ai_response})
